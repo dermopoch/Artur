@@ -3,7 +3,6 @@ import re
 import random
 import os
 import json
-from datetime import datetime
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
@@ -13,14 +12,18 @@ from openai import AsyncOpenAI
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GROK_API_KEY = os.getenv("GROK_API_KEY")  # ← должно быть GROK_API_KEY, не GROQ
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-if not TELEGRAM_TOKEN or not GROK_API_KEY:
-    print("ОШИБКА: TELEGRAM_TOKEN или GROK_API_KEY не найдены в .env!")
+if not TELEGRAM_TOKEN or not OPENROUTER_API_KEY:
+    print("ОШИБКА: TELEGRAM_TOKEN или OPENROUTER_API_KEY не найдены в .env!")
     exit(1)
 
 BOT_USERNAME = "ArturDrun_bot".lower()
-MODEL = "grok-4-latest"  # самая свежая модель Grok
+
+# Модель через OpenRouter (можно менять)
+MODEL = "xai/grok-4-latest"  # Grok-4-latest (знает всё до сегодняшнего дня)
+# или "meta-llama/llama-4-maverick-17b-128e-instruct:free" — если хочешь Llama
+# или "black-forest-labs/flux.1-schnell:free" — для генерации картинок
 
 # Память чата
 HISTORY_FILE = "chat_history.json"
@@ -57,8 +60,8 @@ def save_count():
         f.write(str(mention_count))
 
 client = AsyncOpenAI(
-    base_url="https://api.x.ai/v1",
-    api_key=GROK_API_KEY,
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
 )
 
 bot = Bot(token=TELEGRAM_TOKEN)
@@ -67,7 +70,7 @@ dp = Dispatcher()
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     print(f"[START] /start от {message.from_user.id}")
-    await message.answer("Hii! Пиши мне или отвечай на мои сообщения — буду болтать как пацан", disable_notification=True)
+    await message.answer("Hii, сука! Пиши @ArturDrun_bot или отвечай мне", disable_notification=True)
 
 @dp.message()
 async def handle_message(message: Message):
@@ -120,8 +123,12 @@ async def handle_message(message: Message):
     # Команда help
     if "help" in lower_query or "/help" in lower_query:
         help_text = (
-            "Я Артур — обычный пацан с района, общаюсь как с корешами.  \n"
+            "Я Артур — пацан с района, общаюсь по-пацански.  \n"
             "Команды:  \n"
+            "• кинь кубик [диапазон] — рандомное число  \n"
+            "• кинь кубик — 1-6  \n"
+            "• нарисуй [промпт] — сгенерирую картинку через Flux.1  \n"
+            "• фотка с упоминанием — прочитаю и отвечу  \n"
             "• упомяни меня или ответь на мой ответ — буду болтать  \n"
             "• счет — сколько раз меня отметили или ответили мне"
         )
@@ -133,19 +140,74 @@ async def handle_message(message: Message):
         await message.reply(f"Меня отметили или ответили мне {mention_count} раз за всё время", disable_notification=True)
         return
 
+    # Команда кинь кубик
+    if any(word in lower_query for word in ["кинь кубик", "кинь куб", "брось кубик", "кинь кость", "dice", "кинь", "брось"]):
+        numbers = re.findall(r'\d+', lower_query)
+
+        min_val = 1
+        max_val = 6
+
+        if len(numbers) == 1:
+            try:
+                max_val = int(numbers[0])
+                if max_val < 1:
+                    max_val = 6
+            except:
+                pass
+        elif len(numbers) >= 2:
+            try:
+                min_val = int(numbers[0])
+                max_val = int(numbers[1])
+                if min_val > max_val:
+                    min_val, max_val = max_val, min_val
+                if max_val < 1 or min_val < 1:
+                    min_val, max_val = 1, 6
+            except:
+                pass
+
+        result = random.randint(min_val, max_val)
+        await message.reply(f"{result} 🎲", disable_notification=True)
+        return
+
+    # Команда "нарисуй" (через OpenRouter Flux.1)
+    if any(word in lower_query for word in ["нарисуй", "сгенери", "сделай картинку", "generate image", "draw"]):
+        prompt = query.replace("нарисуй", "").replace("сгенери", "").replace("сделай картинку", "").strip()
+        if not prompt:
+            await message.reply("Чё нарисовать-то? Скажи промпт", disable_notification=True)
+            return
+
+        try:
+            print(f"[IMAGE GEN] Генерируем через OpenRouter: {prompt}")
+            response = await client.images.generate(
+                model="black-forest-labs/flux.1-schnell",
+                prompt=prompt,
+                n=1,
+                size="1024x1024",
+                response_format="url"
+            )
+
+            image_url = response.data[0].url
+            await message.reply_photo(photo=image_url, caption=f"Вот твоя картинка: {prompt}", disable_notification=True)
+            return
+
+        except Exception as e:
+            print(f"[IMAGE GEN ERROR] {str(e)}")
+            await message.reply(f"С генерацией наебнулось: {str(e)[:120]} 🤬 Попробуй позже.", disable_notification=True)
+            return
+
     # Обработка фото
     if message.photo:
         photo = message.photo[-1]
         file_info = await bot.get_file(photo.file_id)
         file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
 
-        caption = message.caption.strip() if message.caption else "Опиши фотку"
+        caption = message.caption.strip() if message.caption else "Опиши фотку по-пацански, прочитай текст если есть"
 
         history_str = "\n".join(chat_history[-10:])
 
         try:
             response = await client.chat.completions.create(
-                model=MODEL,
+                model=TEXT_MODEL,
                 messages=[
                     {
                         "role": "system",
@@ -187,7 +249,7 @@ async def handle_message(message: Message):
 
     # Обычный текст
     if not query:
-        await message.reply("Чё молчишь? Пиши нормально", disable_notification=True)
+        await message.reply("Чё молчишь, пидор? Пиши нормально", disable_notification=True)
         return
 
     # Специальное приветствие
@@ -195,7 +257,7 @@ async def handle_message(message: Message):
         await message.reply("hiii", disable_notification=True)
         return
 
-    # Основной ответ от Grok
+    # Основной ответ от модели
     history_str = "\n".join(chat_history[-10:])
 
     try:
@@ -233,7 +295,7 @@ async def handle_message(message: Message):
         await message.reply(f"Наебнулось: {str(e)[:120]} 🤬 Попробуй позже.", disable_notification=True)
 
 async def main():
-    print(f"Бот запущен | @{BOT_USERNAME} | модель: {MODEL} (Grok API от xAI)")
+    print(f"Бот запущен | @{BOT_USERNAME} | модель: {MODEL} (OpenRouter)")
     print("Ожидаю сообщений... (не закрывай окно)")
     await dp.start_polling(bot)
 
