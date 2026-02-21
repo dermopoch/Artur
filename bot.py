@@ -12,18 +12,15 @@ from openai import AsyncOpenAI
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-if not TELEGRAM_TOKEN or not OPENROUTER_API_KEY:
-    print("ОШИБКА: TELEGRAM_TOKEN или OPENROUTER_API_KEY не найдены в .env!")
+if not TELEGRAM_TOKEN or not GROQ_API_KEY:
+    print("ОШИБКА: TELEGRAM_TOKEN или GROQ_API_KEY не найдены в .env!")
     exit(1)
 
 BOT_USERNAME = "ArturDrun_bot".lower()
-
-# Модель через OpenRouter (можно менять)
-MODEL = "xai/grok-4-latest"  # Grok-4-latest (знает всё до сегодняшнего дня)
-# или "meta-llama/llama-4-maverick-17b-128e-instruct:free" — если хочешь Llama
-# или "black-forest-labs/flux.1-schnell:free" — для генерации картинок
+TEXT_MODEL = "meta-llama/llama-4-maverick-17b-128e-instruct"  # vision + текст
+IMAGE_MODEL = "black-forest-labs/flux.1-schnell"               # генерация картинок
 
 # Память чата
 HISTORY_FILE = "chat_history.json"
@@ -60,8 +57,8 @@ def save_count():
         f.write(str(mention_count))
 
 client = AsyncOpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY,
+    base_url="https://api.groq.com/openai/v1",
+    api_key=GROQ_API_KEY,
 )
 
 bot = Bot(token=TELEGRAM_TOKEN)
@@ -169,7 +166,7 @@ async def handle_message(message: Message):
         await message.reply(f"{result} 🎲", disable_notification=True)
         return
 
-    # Команда "нарисуй" (через OpenRouter Flux.1)
+    # Команда "нарисуй" / "сгенери" (Flux.1 на Groq)
     if any(word in lower_query for word in ["нарисуй", "сгенери", "сделай картинку", "generate image", "draw"]):
         prompt = query.replace("нарисуй", "").replace("сгенери", "").replace("сделай картинку", "").strip()
         if not prompt:
@@ -177,9 +174,9 @@ async def handle_message(message: Message):
             return
 
         try:
-            print(f"[IMAGE GEN] Генерируем через OpenRouter: {prompt}")
+            print(f"[IMAGE GEN] Генерируем через Groq Flux.1: {prompt}")
             response = await client.images.generate(
-                model="black-forest-labs/flux.1-schnell",
+                model=IMAGE_MODEL,
                 prompt=prompt,
                 n=1,
                 size="1024x1024",
@@ -195,7 +192,7 @@ async def handle_message(message: Message):
             await message.reply(f"С генерацией наебнулось: {str(e)[:120]} 🤬 Попробуй позже.", disable_notification=True)
             return
 
-    # Обработка фото
+    # Обработка фото (чтение)
     if message.photo:
         photo = message.photo[-1]
         file_info = await bot.get_file(photo.file_id)
@@ -262,7 +259,7 @@ async def handle_message(message: Message):
 
     try:
         response = await client.chat.completions.create(
-            model=MODEL,
+            model=TEXT_MODEL,
             messages=[
                 {
                     "role": "system",
@@ -295,7 +292,7 @@ async def handle_message(message: Message):
         await message.reply(f"Наебнулось: {str(e)[:120]} 🤬 Попробуй позже.", disable_notification=True)
 
 async def main():
-    print(f"Бот запущен | @{BOT_USERNAME} | модель: {MODEL} (OpenRouter)")
+    print(f"Бот запущен | @{BOT_USERNAME} | текст: {TEXT_MODEL}, картинки: {IMAGE_MODEL} (Groq)")
     print("Ожидаю сообщений... (не закрывай окно)")
     await dp.start_polling(bot)
 
