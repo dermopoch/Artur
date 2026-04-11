@@ -19,7 +19,7 @@ if not TELEGRAM_TOKEN or not GROQ_API_KEY:
     exit(1)
 
 BOT_USERNAME = "ArturDrun_bot".lower()
-TEXT_MODEL = "meta-llama/llama-4-maverick-17b-128e-instruct"  # vision + текст
+TEXT_MODEL = "llama-3.3-70b-versatile"  # vision + текст
 IMAGE_MODEL = "black-forest-labs/flux.1-schnell"               # генерация картинок
 
 # Память чата
