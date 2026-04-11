@@ -1,246 +1,302 @@
 import asyncio
-import json
-import os
 import re
-from pathlib import Path
-
+import random
+import os
+import json
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, PhotoSize
 from openai import AsyncOpenAI
 
-# ---------- загрузка env ----------
-env_path = Path(__file__).resolve().parent / ".env"
-load_dotenv(env_path)
+load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-if not TELEGRAM_TOKEN or not OPENROUTER_API_KEY:
-    print("ОШИБКА: TELEGRAM_TOKEN или OPENROUTER_API_KEY не найдены в .env")
-    raise SystemExit(1)
+if not TELEGRAM_TOKEN or not GROQ_API_KEY:
+    print("ОШИБКА: TELEGRAM_TOKEN или GROQ_API_KEY не найдены в .env!")
+    exit(1)
 
-# username бота в нижнем регистре, БЕЗ @
-BOT_USERNAME = "arturdrun_bot"
+BOT_USERNAME = "ArturDrun_bot".lower()
+TEXT_MODEL = "meta-llama/llama-4-maverick-17b-128e-instruct"  # vision + текст
+IMAGE_MODEL = "black-forest-labs/flux.1-schnell"               # генерация картинок
 
-# Самый простой бесплатный вариант:
-# OpenRouter сам выберет доступную free-модель
-TEXT_MODEL = "openrouter/free"
-
-# Если захочешь зафиксировать модель вручную, можно потом заменить на что-то вроде:
-# TEXT_MODEL = "deepseek/deepseek-r1:free"
-# TEXT_MODEL = "qwen/qwen-2.5-72b-instruct:free"
-# Но free-модели меняются, поэтому openrouter/free стабильнее.
-
+# Память чата
 HISTORY_FILE = "chat_history.json"
-COUNT_FILE = "count.txt"
-
-chat_history: list[dict] = []
-mention_count = 0
-
-# ---------- загрузка / сохранение ----------
-def load_history():
-    global chat_history
-    if os.path.exists(HISTORY_FILE):
-        try:
-            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    chat_history = data
-                else:
-                    chat_history = []
-            print(f"[HISTORY] Загружено {len(chat_history)} сообщений")
-        except Exception as e:
-            print(f"[HISTORY ERROR] {e}")
-            chat_history = []
+chat_history = []
+if os.path.exists(HISTORY_FILE):
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            chat_history = json.load(f)
+        print(f"[HISTORY] Загружена история: {len(chat_history)} сообщений")
+    except Exception as e:
+        print(f"[HISTORY ERROR] Не удалось загрузить историю: {e}")
+        chat_history = []
 
 def save_history():
     try:
         with open(HISTORY_FILE, "w", encoding="utf-8") as f:
             json.dump(chat_history, f, ensure_ascii=False, indent=2)
+        print(f"[HISTORY] Сохранено {len(chat_history)} сообщений")
     except Exception as e:
         print(f"[HISTORY SAVE ERROR] {e}")
 
-def load_count():
-    global mention_count
-    if os.path.exists(COUNT_FILE):
+# Счётчик
+COUNT_FILE = "count.txt"
+mention_count = 0
+if os.path.exists(COUNT_FILE):
+    with open(COUNT_FILE, "r") as f:
         try:
-            with open(COUNT_FILE, "r", encoding="utf-8") as f:
-                mention_count = int(f.read().strip())
-        except Exception:
+            mention_count = int(f.read().strip())
+        except:
             mention_count = 0
 
 def save_count():
-    try:
-        with open(COUNT_FILE, "w", encoding="utf-8") as f:
-            f.write(str(mention_count))
-    except Exception as e:
-        print(f"[COUNT SAVE ERROR] {e}")
+    with open(COUNT_FILE, "w") as f:
+        f.write(str(mention_count))
 
-def add_to_history(role: str, content: str):
-    chat_history.append({"role": role, "content": content})
-    if len(chat_history) > 30:
-        chat_history.pop(0)
-    save_history()
-
-# ---------- клиент ----------
 client = AsyncOpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY,
+    base_url="https://api.groq.com/openai/v1",
+    api_key=GROQ_API_KEY,
 )
 
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-# ---------- системный промпт ----------
-SYSTEM_PROMPT = """
-Ты отвечаешь кратко, естественно и по-человечески.
-Стиль:
-- разговорный русский
-- без пафоса
-- без фразы "как ИИ"
-- без длинных простыней без причины
-- можно шутить, но уместно
-- не будь грубым без причины
-- если не знаешь, честно скажи, что не уверен
-
-Отвечай одним обычным сообщением, как в чате.
-""".strip()
-
-def build_messages(user_text: str) -> list[dict]:
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    messages.extend(chat_history[-10:])
-    messages.append({"role": "user", "content": user_text})
-    return messages
-
-# ---------- команды ----------
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    await message.answer(
-        "Привет. Напиши @ArturDrun_bot в сообщении или ответь на моё сообщение."
-    )
+    print(f"[START] /start от {message.from_user.id}")
+    await message.answer("Hii, сука! Пиши @ArturDrun_bot или отвечай мне", disable_notification=True)
 
-@dp.message(Command("help"))
-async def cmd_help(message: Message):
-    await message.answer(
-        "/start — запуск\n"
-        "/help — помощь\n"
-        "/count — сколько раз меня тегнули или мне ответили\n\n"
-        "Я отвечаю, если:\n"
-        "1) ты упомянул @ArturDrun_bot\n"
-        "2) ты ответил на моё сообщение"
-    )
-
-@dp.message(Command("count"))
-async def cmd_count(message: Message):
-    await message.answer(f"Меня упомянули или мне ответили {mention_count} раз(а).")
-
-# ---------- основной обработчик ----------
 @dp.message()
 async def handle_message(message: Message):
     global mention_count
 
-    if not message.text:
+    if not message.text and not message.photo:
         return
 
-    text = message.text
-    lower_text = text.lower()
-    is_triggered = False
+    # Добавляем в историю
+    user_name = message.from_user.username or message.from_user.first_name or "анон"
+    msg_text = message.text or message.caption or "[фото без подписи]"
+    chat_history.append(f"{user_name}: {msg_text}")
+    if len(chat_history) > 30:
+        chat_history.pop(0)
+    save_history()
 
-    # Проверка mention через entities
+    # Проверка триггера
+    is_triggered = False
+    text = message.text or ""
+    lower_text = text.lower()
+
     if message.entities:
         for entity in message.entities:
             if entity.type == "mention":
-                mentioned = text[entity.offset: entity.offset + entity.length].lstrip("@").lower()
+                mentioned = text[entity.offset:entity.offset + entity.length].lstrip('@').lower()
                 if mentioned == BOT_USERNAME:
                     is_triggered = True
                     break
 
-    # Проверка mention через текст
     if not is_triggered and f"@{BOT_USERNAME}" in lower_text:
         is_triggered = True
 
-    # Проверка reply на бота
-    me = await bot.get_me()
-    if message.reply_to_message and message.reply_to_message.from_user.id == me.id:
+    if message.reply_to_message and message.reply_to_message.from_user.id == (await bot.get_me()).id:
         is_triggered = True
+
+    if is_triggered:
+        mention_count += 1
+        save_count()
+        print(f"[TRIGGER] Упомянули или ответили боту! Всего: {mention_count}")
 
     if not is_triggered:
         return
 
-    mention_count += 1
-    save_count()
+    # Убираем упоминание
+    query = re.sub(r'^@' + re.escape(BOT_USERNAME) + r'\b\s*', '', text, flags=re.IGNORECASE).strip()
+    query = re.sub(r'\s*@' + re.escape(BOT_USERNAME) + r'\b', '', query, flags=re.IGNORECASE).strip()
 
-    # Убираем @bot_username из текста
-    query = re.sub(
-        r"^@" + re.escape(BOT_USERNAME) + r"\b\s*",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    ).strip()
+    lower_query = query.lower()
 
-    query = re.sub(
-        r"\s*@" + re.escape(BOT_USERNAME) + r"\b",
-        "",
-        query,
-        flags=re.IGNORECASE,
-    ).strip()
-
-    if not query:
-        await message.reply("Напиши текст после упоминания.")
+    # Команда help
+    if "help" in lower_query or "/help" in lower_query:
+        help_text = (
+            "Я Артур — пацан с района, общаюсь по-пацански.  \n"
+            "Команды:  \n"
+            "• кинь кубик [диапазон] — рандомное число  \n"
+            "• кинь кубик — 1-6  \n"
+            "• нарисуй [промпт] — сгенерирую картинку через Flux.1  \n"
+            "• фотка с упоминанием — прочитаю и отвечу  \n"
+            "• упомяни меня или ответь на мой ответ — буду болтать  \n"
+            "• счет — сколько раз меня отметили или ответили мне"
+        )
+        await message.reply(help_text, disable_notification=True)
         return
 
-    user_name = message.from_user.username or message.from_user.first_name or "anon"
-    add_to_history("user", f"{user_name}: {query}")
+    # Команда счет
+    if "счет" in lower_query or "счёт" in lower_query:
+        await message.reply(f"Меня отметили или ответили мне {mention_count} раз за всё время", disable_notification=True)
+        return
+
+    # Команда кинь кубик
+    if any(word in lower_query for word in ["кинь кубик", "кинь куб", "брось кубик", "кинь кость", "dice", "кинь", "брось"]):
+        numbers = re.findall(r'\d+', lower_query)
+
+        min_val = 1
+        max_val = 6
+
+        if len(numbers) == 1:
+            try:
+                max_val = int(numbers[0])
+                if max_val < 1:
+                    max_val = 6
+            except:
+                pass
+        elif len(numbers) >= 2:
+            try:
+                min_val = int(numbers[0])
+                max_val = int(numbers[1])
+                if min_val > max_val:
+                    min_val, max_val = max_val, min_val
+                if max_val < 1 or min_val < 1:
+                    min_val, max_val = 1, 6
+            except:
+                pass
+
+        result = random.randint(min_val, max_val)
+        await message.reply(f"{result} 🎲", disable_notification=True)
+        return
+
+    # Команда "нарисуй" / "сгенери" (Flux.1 на Groq)
+    if any(word in lower_query for word in ["нарисуй", "сгенери", "сделай картинку", "generate image", "draw"]):
+        prompt = query.replace("нарисуй", "").replace("сгенери", "").replace("сделай картинку", "").strip()
+        if not prompt:
+            await message.reply("Чё нарисовать-то? Скажи промпт", disable_notification=True)
+            return
+
+        try:
+            print(f"[IMAGE GEN] Генерируем через Groq Flux.1: {prompt}")
+            response = await client.images.generate(
+                model=IMAGE_MODEL,
+                prompt=prompt,
+                n=1,
+                size="1024x1024",
+                response_format="url"
+            )
+
+            image_url = response.data[0].url
+            await message.reply_photo(photo=image_url, caption=f"Вот твоя картинка: {prompt}", disable_notification=True)
+            return
+
+        except Exception as e:
+            print(f"[IMAGE GEN ERROR] {str(e)}")
+            await message.reply(f"С генерацией наебнулось: {str(e)[:120]} 🤬 Попробуй позже.", disable_notification=True)
+            return
+
+    # Обработка фото (чтение)
+    if message.photo:
+        photo = message.photo[-1]
+        file_info = await bot.get_file(photo.file_id)
+        file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
+
+        caption = message.caption.strip() if message.caption else "Опиши фотку по-пацански, прочитай текст если есть"
+
+        history_str = "\n".join(chat_history[-10:])
+
+        try:
+            response = await client.chat.completions.create(
+                model=TEXT_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": f"""Ты — обычный парень по имени Артур, лет 18–20, простой, без понтов, общаешься как в обычном чате с друзьями.
+Стиль общения:
+- простой, разговорный русский, много зумерского сленга (чё, чо, норм, пох, заебал, типо, капец, газ, погна и т.д.)
+- короткие предложения, без заумных фраз
+- материшься редко и только по ситуации (когда реально бесит, удивлён или в шутку), не через каждое слово
+- юмор строится на том, что пишут в чате: подхватывай недавние шутки, мемы, фразы, сленг, подколы из последних сообщений
+- иногда вкидывай лёгкую хуйню, тролль, тупо шути или мемь, но всегда в тему чата
+- никогда не пиши как ИИ: никаких "как ИИ я думаю", "я могу помочь", "давай разберёмся" — просто отвечай как обычный кореш
+- если не знаешь — говори "хз", "без понятия" или придумай что-то смешное
+- если вопрос тупой — можешь сказать "чё за хуйня" или просто посмеяться
+Подстраивайся под стиль и вайб чата: копируй недавние шутки, мемы, сленг из последних сообщений.
+Отвечай только как Артур, одним сообщением, как будто ты в чате с пацанами. Никаких пояснений, никаких "вот мой ответ" — просто текст от Артура.
+- также есть свой словарь мемов, это наши локальные шутки, просто так не пиши их, используй только если будет подходить под тему разговора("еще посидим","бем бем бем","хахаха парни прикиньте для него это деньги","мытищи","магнитогорск","артур","привет артур","о да детка ты такая сладкая конфетка","о да детка ты такая рыбная конфетка котлетка","я уже красный","омагад"."возьми телефон детка, я знаю ты хочешь позвонить","обвисюлики","матрёна говяжьи шторки","я мгбсьг","какашки мне в кармашки","разгруз под туз","пэпэ","фаа","шнейне","я мгбсьг","муся это ты","сисюлики","писюлики","я водопад","саша груша","саша горила","джарвис че за имба","джарвис дрочи мне","джарвис че за хуйня","нет, это патрик","шляпки","шляпность","Сафiйка","вера водопад","самонадутие","данил калбасенка","село молочное","курим кент, ебем блондинок, сами ходим без ботинок","евгений токарь","женя токарник","женя токарь","дырчик токаря","рыж","пыж","брыж","мыш","ржун","рыжий")
+Последние сообщения в чате:
+{history_str}""".format(history_str=history_str)
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": caption},
+                            {"type": "image_url", "image_url": {"url": file_url}}
+                        ]
+                    }
+                ],
+                max_tokens=800,
+                temperature=1.15,
+            )
+
+            answer = response.choices[0].message.content.strip()
+            await message.reply(answer, disable_notification=True)
+            return
+
+        except Exception as e:
+            await message.reply(f"С фоткой наебнулось: {str(e)[:120]} 🤬", disable_notification=True)
+            return
+
+    # Обычный текст
+    if not query:
+        await message.reply("Чё молчишь, пидор? Пиши нормально", disable_notification=True)
+        return
+
+    # Специальное приветствие
+    if any(greet in lower_query for greet in ["привет", "здарова", "здорова", "хай", "hi"]) and "артур" in lower_query:
+        await message.reply("hiii", disable_notification=True)
+        return
+
+    # Основной ответ от модели
+    history_str = "\n".join(chat_history[-10:])
 
     try:
         response = await client.chat.completions.create(
             model=TEXT_MODEL,
-            messages=build_messages(query),
-            max_tokens=400,
-            temperature=0.9,
-            extra_headers={
-                "HTTP-Referer": "https://localhost",
-                "X-Title": "Telegram Bot",
-            },
+            messages=[
+                {
+                    "role": "system",
+                    "content": f"""Ты — обычный парень по имени Артур, лет 18–20, простой, без понтов, общаешься как в обычном чате с друзьями.
+Стиль общения:
+- простой, разговорный русский, много зумерского сленга (чё, чо, норм, пох, заебал, типо, капец, газ, погна и т.д.)
+- короткие предложения, без заумных фраз
+- материшься редко и только по ситуации (когда реально бесит, удивлён или в шутку), не через каждое слово
+- юмор строится на том, что пишут в чате: подхватывай недавние шутки, мемы, фразы, сленг, подколы из последних сообщений
+- иногда вкидывай лёгкую хуйню, тролль, тупо шути или мемь, но всегда в тему чата
+- никогда не пиши как ИИ: никаких "как ИИ я думаю", "я могу помочь", "давай разберёмся" — просто отвечай как обычный кореш
+- если не знаешь — говори "хз", "без понятия" или придумай что-то смешное
+- если вопрос тупой — можешь сказать "чё за хуйня" или просто посмеяться
+Подстраивайся под стиль и вайб чата: копируй недавние шутки, мемы, сленг из последних сообщений.
+Отвечай только как Артур, одним сообщением, как будто ты в чате с пацанами. Никаких пояснений, никаких "вот мой ответ" — просто текст от Артура.
+- также есть свой словарь мемов, это наши локальные шутки, просто так не пиши их, используй только если будет подходить под тему разговора("еще посидим","бем бем бем","хахаха парни прикиньте для него это деньги","мытищи","магнитогорск","артур","привет артур","о да детка ты такая сладкая конфетка","о да детка ты такая рыбная конфетка котлетка","я уже красный","омагад"."возьми телефон детка, я знаю ты хочешь позвонить","обвисюлики","матрёна говяжьи шторки","я мгбсьг","какашки мне в кармашки","разгруз под туз","пэпэ","фаа","шнейне","я мгбсьг","муся это ты","сисюлики","писюлики","я водопад","саша груша","саша горила","джарвис че за имба","джарвис дрочи мне","джарвис че за хуйня","нет, это патрик","шляпки","шляпность","Сафiйка","вера водопад","самонадутие","данил калбасенка","село молочное","курим кент, ебем блондинок, сами ходим без ботинок","евгений токарь","женя токарник","женя токарь","дырчик токаря","рыж","пыж","брыж","мыш","ржун","рыжий")
+Последние сообщения в чате:
+
+Последние сообщения в чате:
+{history_str}""".format(history_str=history_str)
+                },
+                {"role": "user", "content": query}
+            ],
+            max_tokens=800,
+            temperature=1.15,
         )
 
         answer = response.choices[0].message.content.strip()
-        if not answer:
-            answer = "Пусто ответило, попробуй ещё раз."
-
-        add_to_history("assistant", answer)
-        await message.reply(answer)
+        await message.reply(answer, disable_notification=True)
 
     except Exception as e:
-        err_text = str(e)
+        await message.reply(f"Наебнулось: {str(e)[:120]} 🤬 Попробуй позже.", disable_notification=True)
 
-        if "429" in err_text:
-            await message.reply(
-                "Лимит запросов кончился или free-модель сейчас занята. Попробуй позже."
-            )
-        elif "401" in err_text:
-            await message.reply("Неверный OPENROUTER_API_KEY.")
-        else:
-            await message.reply(f"Ошибка модели: {err_text[:180]}")
-
-# ---------- запуск ----------
 async def main():
-    load_history()
-    load_count()
-
-    print(f"Бот запущен | @{BOT_USERNAME}")
-    print(f"MODEL={TEXT_MODEL}")
-    print("Ожидаю сообщений...")
-
-    while True:
-        try:
-            await dp.start_polling(bot)
-        except Exception as e:
-            print(f"[POLLING ERROR] {e}")
-            print("Повторная попытка через 5 секунд...")
-            await asyncio.sleep(5)
+    print(f"Бот запущен | @{BOT_USERNAME} | текст: {TEXT_MODEL}, картинки: {IMAGE_MODEL} (Groq)")
+    print("Ожидаю сообщений... (не закрывай окно)")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
